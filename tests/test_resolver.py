@@ -1,12 +1,14 @@
 """Tests for the YouTube URL resolver."""
 
 import json
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from youtube_brain.ingest.resolver import (
     UrlParseResult,
+    fetch_video_stats,
     parse_youtube_url,
     resolve_video_ids,
     _resolve_playlist,
@@ -167,6 +169,59 @@ def test_resolve_channel_id(mock_run):
 
     call_args = mock_run.call_args[0][0]
     assert "https://www.youtube.com/channel/UC123abc/videos" in " ".join(call_args)
+
+
+@patch("youtube_brain.ingest.resolver.subprocess.run")
+def test_resolve_single_video_includes_stats(mock_run):
+    entry = {
+        "title": "T1",
+        "channel": "C1",
+        "channel_id": "UC1",
+        "duration": 120,
+        "view_count": 1000,
+        "like_count": 50,
+        "comment_count": 5,
+        "channel_follower_count": 20000,
+    }
+    mock_run.return_value = MagicMock(stdout=json.dumps(entry), returncode=0)
+
+    pr = UrlParseResult(source_type="video", video_id="vid1", original_url="")
+    result = resolve_video_ids(pr)
+    assert result[0]["view_count"] == 1000
+    assert result[0]["like_count"] == 50
+    assert result[0]["comment_count"] == 5
+    assert result[0]["channel_follower_count"] == 20000
+    assert isinstance(result[0]["stats_fetched_at"], datetime)
+
+
+@patch("youtube_brain.ingest.resolver.subprocess.run")
+def test_fetch_video_stats(mock_run):
+    entry = {
+        "view_count": 500,
+        "like_count": 10,
+        "comment_count": 2,
+        "channel_follower_count": 3000,
+    }
+    mock_run.return_value = MagicMock(stdout=json.dumps(entry), returncode=0)
+
+    stats = fetch_video_stats("vid1")
+    assert stats["view_count"] == 500
+    assert stats["like_count"] == 10
+    assert stats["comment_count"] == 2
+    assert stats["channel_follower_count"] == 3000
+    assert isinstance(stats["stats_fetched_at"], datetime)
+
+
+@patch("youtube_brain.ingest.resolver.subprocess.run", side_effect=Exception("boom"))
+def test_fetch_video_stats_failure_returns_none_values(mock_run):
+    stats = fetch_video_stats("vid1")
+    assert stats == {
+        "view_count": None,
+        "like_count": None,
+        "comment_count": None,
+        "channel_follower_count": None,
+        "stats_fetched_at": None,
+    }
 
 
 def test_resolve_video_missing_id():

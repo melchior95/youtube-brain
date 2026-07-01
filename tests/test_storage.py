@@ -131,6 +131,39 @@ async def test_insert_and_get_video(db):
     assert vids[0].video_id == "abc"
 
 
+async def test_insert_and_get_video_stats(db):
+    from datetime import datetime, timezone
+
+    brain = Brain(name="Stats Brain")
+    await insert_brain(brain)
+    source = Source(
+        brain_id=brain.id,
+        source_type=SourceType.VIDEO,
+        source_url="https://youtube.com/watch?v=stats",
+        source_id="stats",
+    )
+    fetched_at = datetime.now(timezone.utc)
+    video = Video(
+        brain_id=brain.id,
+        source_id=source.id,
+        video_id="stats",
+        url="https://youtube.com/watch?v=stats",
+        view_count=12345,
+        like_count=678,
+        comment_count=90,
+        channel_follower_count=100000,
+        stats_fetched_at=fetched_at,
+    )
+    await insert_video(video)
+
+    vids = await get_videos_by_brain(brain.id)
+    assert vids[0].view_count == 12345
+    assert vids[0].like_count == 678
+    assert vids[0].comment_count == 90
+    assert vids[0].channel_follower_count == 100000
+    assert vids[0].stats_fetched_at is not None
+
+
 async def test_get_videos_by_brain_with_status_filter(db):
     brain = Brain(name="Filter Brain")
     await insert_brain(brain)

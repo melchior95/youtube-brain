@@ -29,6 +29,39 @@ read the output. The bugs below were all invisible to the unit suite.
   `attribute()` can map them back to a chunk and recover a `youtu.be?t=` timestamp.
   Paraphrased quotes lose their citation.
 
+## Video metadata / stats
+
+- **`--flat-playlist` (channel/playlist enumeration) omits `view_count`,
+  `like_count`, `comment_count`, `channel_follower_count` — and even
+  `channel`/`channel_id`.** Only a full per-video `yt-dlp --dump-json` fetch
+  (no `--flat-playlist`) returns them, confirmed empirically, not assumed. This
+  means capturing view/like/comment/subscriber counts for channel or playlist
+  ingestion is NOT free: the pipeline does one extra best-effort `yt-dlp`
+  subprocess call per video (`resolver.fetch_video_stats`) to backfill them,
+  skipped when the video_meta already carries `view_count` (the single-video
+  resolve path already did a full fetch). That's one more request per video on
+  top of the transcript fetch, worth knowing given how much effort the IP/rate
+  limit resilience stack elsewhere in this project already spends.
+- Because of the above, `channel_name` is still `None` for channel/playlist-
+  ingested videos (a pre-existing gap, not introduced by the stats work) — flat
+  enumeration doesn't return `channel`/`uploader` either, and the stats
+  backfill deliberately doesn't fill it in (scoped tightly to the 4 numeric
+  fields). Fix would be the same `fetch_video_stats`-style backfill extended to
+  `channel_name`/`channel_id`.
+- **`view_count` is a snapshot, not live** — captured once at ingest and never
+  updated automatically. Comparing it across videos ingested weeks apart isn't
+  apples-to-apples (a just-pulled video's count reflects "now"; an old one
+  reflects whenever it happened to be pulled). `pipeline.refresh_video_stats`
+  is an on-demand, per-brain re-fetch (`skill_bridge.py refresh-stats`) for
+  when current numbers matter; it's deliberately NOT wired into the
+  `watch run` cron loop, since that would silently add one yt-dlp call per
+  already-known video on every scheduled tick.
+- **Outlier detection groups by `brain_id`, not `channel_name`** —
+  `observations/outliers.py`'s `compute_outliers` sidesteps the
+  `channel_name`-is-null gap above by using the brain itself as the grouping
+  unit (one brain == one creator in this project's ingestion model), comparing
+  each video's `view_count` against its brain's own median.
+
 ## Retrieval (FTS5 + local embeddings)
 
 - **`chunks_fts` is kept in sync by triggers**, not by `insert_chunks`. So keyword
@@ -59,7 +92,7 @@ read the output. The bugs below were all invisible to the unit suite.
 
 ## Testing & ops
 
-- ~105 unit tests: `pytest -k "not integration"`. No API key needed; nothing hits the
+- ~112 unit tests: `pytest -k "not integration"`. No API key needed; nothing hits the
   network in the default run.
 - The local embedder needs a model download, so unit tests never call it directly:
   `embed.cosine` is unit-tested as a pure function, and the pipeline tests patch

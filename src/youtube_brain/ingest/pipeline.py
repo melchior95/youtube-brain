@@ -17,7 +17,7 @@ from youtube_brain.core.enums import BrainStatus, SourceStatus, SourceType, Vide
 from youtube_brain.core.models import Brain, Chunk, Source, Video
 from youtube_brain.embed import EMBED_DIMS, EMBED_MODEL, embed_texts
 from youtube_brain.ingest.chunker import chunk_transcript
-from youtube_brain.ingest.resolver import parse_youtube_url, resolve_video_ids
+from youtube_brain.ingest.resolver import fetch_video_stats, parse_youtube_url, resolve_video_ids
 from youtube_brain.ingest.transcripts import fetch_transcript
 from youtube_brain.storage.brains import (
     increment_video_count,
@@ -26,7 +26,12 @@ from youtube_brain.storage.brains import (
 )
 from youtube_brain.storage.chunks import insert_chunks, store_embedding
 from youtube_brain.storage.database import get_session, sources as sources_table
-from youtube_brain.storage.videos import insert_video, update_video, video_exists
+from youtube_brain.storage.videos import (
+    get_videos_by_brain,
+    insert_video,
+    update_video,
+    video_exists,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +202,13 @@ async def ingest_url(
             caption_kind = "auto" if transcript_result.is_auto_generated else "manual"
             language = transcript_result.language
 
+            # c2. Backfill view/like/comment/subscriber counts. --flat-playlist
+            #    enumeration (channels/playlists) never returns these; a single-
+            #    video resolve already has them. Best-effort: failures leave the
+            #    stats as None rather than blocking ingestion.
+            if "view_count" not in video_meta:
+                video_meta = {**video_meta, **fetch_video_stats(vid_id)}
+
             # d. Insert video record
             video = Video(
                 brain_id=brain.id,
@@ -206,6 +218,11 @@ async def ingest_url(
                 channel_name=video_meta.get("channel_name"),
                 published_at=video_meta.get("published_at"),
                 duration_seconds=video_meta.get("duration_seconds"),
+                view_count=video_meta.get("view_count"),
+                like_count=video_meta.get("like_count"),
+                comment_count=video_meta.get("comment_count"),
+                channel_follower_count=video_meta.get("channel_follower_count"),
+                stats_fetched_at=video_meta.get("stats_fetched_at"),
                 url=f"https://www.youtube.com/watch?v={vid_id}",
                 transcript_raw=transcript_raw,
                 transcript_clean=transcript_clean_text,
@@ -274,3 +291,33 @@ async def ingest_url(
         await update_brain_status(brain.id, BrainStatus.ERROR)
 
     return result
+
+
+async def refresh_video_stats(brain_id: str) -> dict:
+    """Re-fetch and store current view/like/comment/subscriber counts for
+    every video in a brain.
+
+    On-demand only, never run automatically: stats are otherwise frozen at
+    whatever moment each video was first ingested (or last refreshed here), so
+    they drift out of sync across videos pulled at different times. Best-
+    effort per video: a failed fetch leaves that video's existing stats
+    untouched rather than blanking them with Nones.
+    """
+    videos = await get_videos_by_brain(brain_id, limit=None)
+    refreshed = 0
+    failed = 0
+    for video in videos:
+        stats = fetch_video_stats(video.video_id)
+        if stats.get("view_count") is None:
+            failed += 1
+            continue
+        await update_video(
+            video.id,
+            view_count=stats["view_count"],
+            like_count=stats["like_count"],
+            comment_count=stats["comment_count"],
+            channel_follower_count=stats["channel_follower_count"],
+            stats_fetched_at=stats["stats_fetched_at"],
+        )
+        refreshed += 1
+    return {"videos_total": len(videos), "videos_refreshed": refreshed, "videos_failed": failed}

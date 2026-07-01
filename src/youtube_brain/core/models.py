@@ -53,6 +53,11 @@ class Video(BaseModel):
     channel_name: str | None = None
     published_at: datetime | None = None
     duration_seconds: int | None = None
+    view_count: int | None = None
+    like_count: int | None = None
+    comment_count: int | None = None
+    channel_follower_count: int | None = None
+    stats_fetched_at: datetime | None = None
     url: str
     transcript_raw: str | None = None
     transcript_clean: str | None = None

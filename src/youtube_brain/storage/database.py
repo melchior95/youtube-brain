@@ -68,6 +68,11 @@ videos = Table(
     Column("channel_name", Text, nullable=True),
     Column("published_at", DateTime, nullable=True),
     Column("duration_seconds", Integer, nullable=True),
+    Column("view_count", Integer, nullable=True),
+    Column("like_count", Integer, nullable=True),
+    Column("comment_count", Integer, nullable=True),
+    Column("channel_follower_count", Integer, nullable=True),
+    Column("stats_fetched_at", DateTime, nullable=True),
     Column("url", Text, nullable=False),
     Column("transcript_raw", Text, nullable=True),
     Column("transcript_clean", Text, nullable=True),
@@ -198,6 +203,32 @@ _FTS5_TRIGGERS = [
 ]
 
 # -----------------------------------------------------------------------------
+# Lightweight schema migration
+# -----------------------------------------------------------------------------
+# No migration framework in this project; metadata.create_all() only creates
+# missing tables, it never alters existing ones. New nullable columns are
+# added here so a pre-existing videos.db on disk picks them up.
+
+_VIDEO_STAT_COLUMNS = [
+    ("view_count", "INTEGER"),
+    ("like_count", "INTEGER"),
+    ("comment_count", "INTEGER"),
+    ("channel_follower_count", "INTEGER"),
+    ("stats_fetched_at", "DATETIME"),
+]
+
+
+def _ensure_video_stat_columns(sync_engine) -> None:
+    """Add stat columns to an existing videos table if they're missing."""
+    with sync_engine.connect() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(videos)")).fetchall()}
+        for name, sql_type in _VIDEO_STAT_COLUMNS:
+            if name not in existing:
+                conn.execute(text(f"ALTER TABLE videos ADD COLUMN {name} {sql_type}"))
+        conn.commit()
+
+
+# -----------------------------------------------------------------------------
 # Database Engine & Session Management
 # -----------------------------------------------------------------------------
 
@@ -248,6 +279,7 @@ async def init_database(settings: Settings | None = None) -> None:
         cursor.close()
 
     metadata.create_all(sync_engine)
+    _ensure_video_stat_columns(sync_engine)
 
     # Create FTS5 virtual table and triggers
     with sync_engine.connect() as conn:

@@ -162,14 +162,12 @@ def resolve_video_ids(parse_result: UrlParseResult) -> list[dict]:
     raise ValueError(f"Unknown source_type: {parse_result.source_type}")
 
 
-def _resolve_single_video(video_id: str) -> dict:
-    """Fetch metadata for a single video via yt-dlp --dump-json.
+def _fetch_full_metadata(video_id: str) -> dict | None:
+    """Run yt-dlp --dump-json for a single video; None if the subprocess fails.
 
-    Falls back to a bare dict (id only) if yt-dlp fails, so ingestion can
-    still proceed using the transcript alone.
-
-    Returns:
-        Dict with keys: video_id, title, channel_name, duration_seconds.
+    Unlike --flat-playlist enumeration (used for channels/playlists), this full
+    extraction includes view_count, like_count, comment_count, and
+    channel_follower_count.
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
     cmd = [
@@ -184,24 +182,64 @@ def _resolve_single_video(video_id: str) -> dict:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=60, check=True
         )
-        entry = json.loads(result.stdout.strip().splitlines()[0])
-        return {
-            "video_id": video_id,
-            "title": entry.get("title"),
-            "channel_name": entry.get("channel") or entry.get("uploader"),
-            "channel_id": entry.get("channel_id"),
-            "duration_seconds": entry.get("duration"),
-            "published_at": _parse_published(entry),
-        }
+        return json.loads(result.stdout.strip().splitlines()[0])
     except Exception as exc:
         logger.warning("Could not fetch metadata for video %s: %s", video_id, exc)
-        return {
-            "video_id": video_id,
-            "title": None,
-            "channel_name": None,
-            "channel_id": None,
-            "duration_seconds": None,
-        }
+        return None
+
+
+def _resolve_single_video(video_id: str) -> dict:
+    """Fetch metadata for a single video via yt-dlp --dump-json.
+
+    Falls back to a bare dict (id only) if yt-dlp fails, so ingestion can
+    still proceed using the transcript alone.
+
+    Returns:
+        Dict with keys: video_id, title, channel_name, channel_id,
+        duration_seconds, published_at, view_count, like_count,
+        comment_count, channel_follower_count, stats_fetched_at.
+    """
+    entry = _fetch_full_metadata(video_id)
+    fetched_at = datetime.now(timezone.utc) if entry else None
+    entry = entry or {}
+    return {
+        "video_id": video_id,
+        "title": entry.get("title"),
+        "channel_name": entry.get("channel") or entry.get("uploader"),
+        "channel_id": entry.get("channel_id"),
+        "duration_seconds": entry.get("duration"),
+        "published_at": _parse_published(entry),
+        "view_count": entry.get("view_count"),
+        "like_count": entry.get("like_count"),
+        "comment_count": entry.get("comment_count"),
+        "channel_follower_count": entry.get("channel_follower_count"),
+        "stats_fetched_at": fetched_at,
+    }
+
+
+def fetch_video_stats(video_id: str) -> dict:
+    """Best-effort fetch of view/like/comment/subscriber counts for a video.
+
+    --flat-playlist enumeration (used for channel/playlist ingestion) doesn't
+    include these fields, so the pipeline calls this per video to backfill them
+    from a full yt-dlp metadata fetch. Never raises; failures come back as all
+    None (including stats_fetched_at) so ingestion proceeds without stats
+    rather than being blocked by them.
+
+    Also used stand-alone to refresh already-stored stats on demand: counts
+    are otherwise frozen at whatever moment a video was first captured, so
+    they drift out of sync across videos ingested at different times.
+    """
+    entry = _fetch_full_metadata(video_id)
+    fetched_at = datetime.now(timezone.utc) if entry else None
+    entry = entry or {}
+    return {
+        "view_count": entry.get("view_count"),
+        "like_count": entry.get("like_count"),
+        "comment_count": entry.get("comment_count"),
+        "channel_follower_count": entry.get("channel_follower_count"),
+        "stats_fetched_at": fetched_at,
+    }
 
 
 def _resolve_playlist(playlist_id: str) -> list[dict]:

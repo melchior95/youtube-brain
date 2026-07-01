@@ -40,10 +40,12 @@ from sqlalchemy import text
 
 from youtube_brain.core.models import Observation
 from youtube_brain.embed import cosine, embed_query
+from youtube_brain.ingest.pipeline import refresh_video_stats
 from youtube_brain.ingest.pull import pull_creator
 from youtube_brain.observations.crosscreator import cross_creator_intelligence
 from youtube_brain.observations.extractor import attribute
 from youtube_brain.observations.lint import lint_candidates
+from youtube_brain.observations.outliers import compute_outliers
 from youtube_brain.observations.report import build_intelligence, build_report
 from youtube_brain.storage.brains import list_brains
 from youtube_brain.storage.database import get_session, init_database
@@ -51,6 +53,7 @@ from youtube_brain.storage.observations import (
     get_observations_by_brain,
     insert_observations,
 )
+from youtube_brain.storage.videos import get_videos_by_brain
 
 # Default caps, bound cost on channels and keep stdout manageable for Claude.
 DEFAULT_MAX_CHARS = 0  # 0 = no truncation: hand Claude the full transcript to summarize
@@ -701,6 +704,74 @@ async def cmd_lint(brain_ids: list[str], all_brains: bool, max_groups: int) -> N
     })
 
 
+async def cmd_outliers(
+    brain_ids: list[str], all_brains: bool, ratio: float, min_videos: int
+) -> None:
+    """Surface videos that wildly overperform their brain's median view count.
+
+    Grouped by brain (not channel_name, which is null for channel/playlist-
+    ingested videos), scored by view_count / brain-median ratio. Deterministic:
+    real median + ratio, never guessed, mirroring the report/lint trust rule.
+
+    view_count is a snapshot from ingest or last `refresh-stats` run, not
+    live: run `refresh-stats` first if the brain hasn't been refreshed recently.
+    """
+    await init_database()
+    all_list = await list_brains()
+    name_map = {str(b.id): b.name for b in all_list}
+    if all_brains:
+        brain_ids = [str(b.id) for b in all_list]
+    brain_ids = [b for b in brain_ids if b]
+    if not brain_ids:
+        _emit({"error": "no_brain_selected"})
+        return
+
+    results = []
+    for bid in brain_ids:
+        videos = await get_videos_by_brain(bid, limit=None)
+        found = compute_outliers(videos, ratio_threshold=ratio, min_videos=min_videos)
+        if found:
+            results.append({
+                "brain_id": bid,
+                "brain_name": name_map.get(bid, bid),
+                "outliers": found,
+            })
+
+    _emit({
+        "brain_ids": brain_ids,
+        "ratio_threshold": ratio,
+        "results": results,
+        "note": "view_count is a snapshot from ingest/last refresh time, not live. "
+                "Run `refresh-stats <brain_id>` first for current numbers.",
+    })
+
+
+async def cmd_refresh_stats(brain_ids: list[str], all_brains: bool) -> None:
+    """Re-fetch view/like/comment/subscriber counts for every video in a brain.
+
+    On-demand only, never automatic: counts are otherwise frozen at whatever
+    moment each video was first ingested, so they drift out of sync across
+    videos pulled at different times. One extra yt-dlp call per video, so
+    --all across many/large brains can be slow and adds real request volume.
+    """
+    await init_database()
+    all_list = await list_brains()
+    name_map = {str(b.id): b.name for b in all_list}
+    if all_brains:
+        brain_ids = [str(b.id) for b in all_list]
+    brain_ids = [b for b in brain_ids if b]
+    if not brain_ids:
+        _emit({"error": "no_brain_selected"})
+        return
+
+    results = []
+    for bid in brain_ids:
+        stats = await refresh_video_stats(bid)
+        results.append({"brain_id": bid, "brain_name": name_map.get(bid, bid), **stats})
+
+    _emit({"brain_ids": brain_ids, "results": results})
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -756,6 +827,18 @@ def _build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--all", action="store_true", help="Across every brain.")
     lp.add_argument("--max-groups", type=int, default=40, help="Max tension groups to emit.")
 
+    outp = sub.add_parser("outliers", help="Surface videos that wildly overperform their brain's median views.")
+    outp.add_argument("brain_id", nargs="?", default=None, help="Single brain id. Omit with --brains/--all.")
+    outp.add_argument("--brains", default=None, help="Comma-separated brain ids.")
+    outp.add_argument("--all", action="store_true", help="Across every brain.")
+    outp.add_argument("--ratio", type=float, default=3.0, help="Min view_count / brain-median ratio to flag.")
+    outp.add_argument("--min-videos", type=int, default=3, help="Skip brains with fewer scored videos than this.")
+
+    rsp = sub.add_parser("refresh-stats", help="Re-fetch view/like/comment/subscriber counts for a brain.")
+    rsp.add_argument("brain_id", nargs="?", default=None, help="Single brain id. Omit with --brains/--all.")
+    rsp.add_argument("--brains", default=None, help="Comma-separated brain ids.")
+    rsp.add_argument("--all", action="store_true", help="Across every brain (can be slow, one yt-dlp call/video).")
+
     return p
 
 
@@ -801,6 +884,22 @@ def main(argv: list[str] | None = None) -> None:
         else:
             ids = []
         asyncio.run(cmd_lint(ids, args.all, args.max_groups))
+    elif args.cmd == "outliers":
+        if args.brains:
+            ids = [b.strip() for b in args.brains.split(",") if b.strip()]
+        elif args.brain_id:
+            ids = [args.brain_id]
+        else:
+            ids = []
+        asyncio.run(cmd_outliers(ids, args.all, args.ratio, args.min_videos))
+    elif args.cmd == "refresh-stats":
+        if args.brains:
+            ids = [b.strip() for b in args.brains.split(",") if b.strip()]
+        elif args.brain_id:
+            ids = [args.brain_id]
+        else:
+            ids = []
+        asyncio.run(cmd_refresh_stats(ids, args.all))
 
 
 if __name__ == "__main__":

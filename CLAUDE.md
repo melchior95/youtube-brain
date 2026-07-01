@@ -34,7 +34,8 @@ CLI-focused, no external API. Source under `src/youtube_brain/`:
 `config/` settings · `core/` models+enums · `storage/` schema+CRUD · `embed.py`
 local embedder + cosine · `ingest/` resolver, transcripts, chunker, pipeline
 (transcript -> chunk -> FTS -> embed) · `retrieval/` FTS5/BM25 + reranker ·
-`observations/` report (consensus), lint (divergence), rollups, timeline ·
+`observations/` report (consensus), lint (divergence), rollups, timeline, outliers
+(view-count outliers) ·
 `cli.py` (the `ytbrain list` command). The `scripts/skill_bridge.py` bridge is the
 primary surface; `scripts/backfill_embeddings.py` embeds pre-existing brains.
 (An older Gemini-based web UI lives on the `web` branch.)
@@ -47,6 +48,8 @@ python scripts/skill_bridge.py pull "<url>" [--limit N]  # ingest (transcript + 
 python scripts/skill_bridge.py context <brain_id> "<q>"  # keyword retrieval for a cited answer
 python scripts/skill_bridge.py report --all              # entity-based consensus
 python scripts/skill_bridge.py lint --all                # contradictions / staleness
+python scripts/skill_bridge.py outliers --all            # videos overperforming their brain's median views
+python scripts/skill_bridge.py refresh-stats <brain_id>  # re-fetch view/like/comment/subscriber counts
 python -m youtube_brain.cli list                         # list brains
 ```
 
